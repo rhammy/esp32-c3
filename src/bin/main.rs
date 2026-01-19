@@ -8,9 +8,13 @@
 #![deny(clippy::large_stack_frames)]
 
 use esp_backtrace as _;
-use esp_hal::clock::CpuClock;
-use esp_hal::main;
-use esp_hal::time::{Duration, Instant};
+use embedded_dht_rs::dht22::Dht22;
+use esp_hal::{
+    delay::Delay,
+    gpio::{DriveMode, Flex, OutputConfig, Pull},
+    clock::CpuClock,
+    main
+};
 use log::info;
 
 // This creates a default app-descriptor required by the esp-idf bootloader.
@@ -21,6 +25,10 @@ esp_bootloader_esp_idf::esp_app_desc!();
     clippy::large_stack_frames,
     reason = "it's not unusual to allocate larger buffers etc. in main"
 )]
+fn c_to_f(celcius: f32) -> f32 {
+    celcius * 9.0/5.0 + 32.0
+}
+
 #[main]
 fn main() -> ! {
     // generator version: 1.1.0
@@ -28,13 +36,39 @@ fn main() -> ! {
     esp_println::logger::init_logger_from_env();
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
-    let _peripherals = esp_hal::init(config);
+    let peripherals = esp_hal::init(config);
+    let delay = Delay::new();
+
+    // DHT sensor is hooked into 3V power, GND, and GPIO0
+    // Learning that some GPIO pins are unsafe to use on a board
+    // DHT22 sensor setup (GPIO0), DHT library needed.
+    let mut dht22_pin = Flex::new(peripherals.GPIO0);
+    dht22_pin.apply_output_config(
+        &OutputConfig::default()
+            .with_drive_mode(DriveMode::OpenDrain)
+            .with_pull(Pull::None),
+    );
+    dht22_pin.set_output_enable(true);
+    dht22_pin.set_input_enable(true);
+    dht22_pin.set_high();
+
+    let mut dht22 = Dht22::new(dht22_pin, Delay::new());
 
     loop {
         info!("Hello world!");
-        let delay_start = Instant::now();
-        while delay_start.elapsed() < Duration::from_millis(500) {}
+        // Can only read DHT every 2s
+        delay.delay_millis(2000);
+        match dht22.read() {
+            Ok(sensor_reading) => {
+                esp_println::println!{"DHT Sensor: Temp {}, Humidity {} ", 
+                    c_to_f(sensor_reading.temperature),
+                    sensor_reading.humidity 
+                };
+            },
+            Err(e) => {
+                esp_println::dbg!("An error occurred: {}", e);
+            }
+        }
     }
-
     // for inspiration have a look at the examples at https://github.com/esp-rs/esp-hal/tree/esp-hal-v~1.0/examples
 }
