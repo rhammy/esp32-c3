@@ -8,15 +8,17 @@
 #![deny(clippy::large_stack_frames)]
 
 use esp_backtrace as _;
+use critical_section::Mutex;
 use embedded_dht_rs::dht22::Dht22;
-use embassy_executor::Spawner;
+use core::cell::RefCell;
 use esp_hal::{
     delay::Delay,
-    gpio::{Input, DriveMode, Flex, OutputConfig, Pull, InputConfig},
-    clock::CpuClock
+    gpio::{Input, DriveMode, Flex, OutputConfig, Pull, InputConfig, Io, Event},
+    clock::CpuClock,
+    ram,
+    handler,
+    main
 };
-use embassy_time::{Duration, Timer};
-use log::info;
 
 // This creates a default app-descriptor required by the esp-idf bootloader.
 // For more information see: <https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/system/app_image_format.html#application-description>
@@ -26,20 +28,16 @@ esp_bootloader_esp_idf::esp_app_desc!();
     clippy::large_stack_frames,
     reason = "it's not unusual to allocate larger buffers etc. in main"
 )]
+
 fn c_to_f(celcius: f32) -> f32 {
     celcius * 9.0/5.0 + 32.0
 }
+// Static global variable so the ISR has access to the sensor, wrap it in a mutex.
+static MOTION_SENSOR: Mutex<RefCell<Option<Input>>> = Mutex::new(RefCell::new(None));
+static DHT_SENSOR: Mutex<RefCell<Option<Dht22<Flex, Delay>>>> = Mutex::new(RefCell::new(None));
 
-#[embassy_executor::task]
-async fn run() {
-    loop {
-        esp_println::println!("Hello world from embassy!");
-        Timer::after(Duration::from_millis(1_000)).await;
-    }
-}
-
-#[esp_rtos::main]
-async fn main(spawner: Spawner) -> ! {
+#[main]
+fn main() -> ! {
     // generator version: 1.1.0
 
     esp_println::logger::init_logger_from_env();
@@ -47,6 +45,8 @@ async fn main(spawner: Spawner) -> ! {
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
     let delay = Delay::new();
+    let mut io = Io::new(peripherals.IO_MUX);
+    io.set_interrupt_handler(handler);
 
     // DHT sensor is hooked into 3V power, GND, and GPIO0
     // Learning that some GPIO pins are unsafe to use on a board
@@ -61,28 +61,60 @@ async fn main(spawner: Spawner) -> ! {
     dht22_pin.set_input_enable(true);
     dht22_pin.set_high();
 
-    let mut dht22 = Dht22::new(dht22_pin, Delay::new());
+    let dht22 = Dht22::new(dht22_pin, Delay::new());
 
     // HC-SR501 PIR Sensor setup (GPIO1)
     let mut pir_sensor = Input::new(peripherals.GPIO1, InputConfig::default());
-    spawner.spawn(run()).ok();
+    critical_section::with(|cs| {
+        pir_sensor.listen(Event::FallingEdge);
+        MOTION_SENSOR.borrow_ref_mut(cs).replace(pir_sensor);
+        DHT_SENSOR.borrow_ref_mut(cs).replace(dht22)
+    });
 
     loop {
-        pir_sensor.wait_for_high().await;
-        info!("Motion detected!");
-        // Can only read DHT every 2s
-        delay.delay_millis(2000);
-        match dht22.read() {
-            Ok(sensor_reading) => {
-                esp_println::println!{"DHT Sensor: Temp {}, Humidity {} ", 
-                    c_to_f(sensor_reading.temperature),
-                    sensor_reading.humidity 
-                };
-            },
-            Err(e) => {
-                esp_println::dbg!("An error occurred: {}", e);
-            }
-        }
+        // TODO: Web server logic?
+        delay.delay_millis(200);
+
     }
     // for inspiration have a look at the examples at https://github.com/esp-rs/esp-hal/tree/esp-hal-v~1.0/examples
+}
+
+#[handler]
+#[ram]
+fn handler() {
+    esp_println::println!("GPIO Interrupt");
+    if critical_section::with(|cs| {
+        MOTION_SENSOR
+            .borrow_ref_mut(cs)
+            .as_mut()
+            .unwrap()
+            .is_interrupt_set()
+    }) {
+        esp_println::println!("Motion was the source of the interrupt");
+        // Read temp and humidity here
+        critical_section::with(|cs| {
+            match DHT_SENSOR.borrow_ref_mut(cs).as_mut().unwrap().read() {
+                Ok(sensor_reading) => {
+                    esp_println::println!{"DHT Sensor: Temp {}, Humidity {} ", 
+                        c_to_f(sensor_reading.temperature),
+                        sensor_reading.humidity 
+                    };
+                },
+                Err(e) => {
+                    esp_println::dbg!("An error occurred: {}", e);
+                }
+            }
+        });
+
+        critical_section::with(|cs| {
+            MOTION_SENSOR
+                .borrow_ref_mut(cs)
+                .as_mut()
+                .unwrap()
+                .clear_interrupt()
+            });
+        } 
+    else {
+        esp_println::println!("Motion was not the source of the interrupt");
+    }
 }
