@@ -9,12 +9,13 @@
 
 use esp_backtrace as _;
 use embedded_dht_rs::dht22::Dht22;
+use embassy_executor::Spawner;
 use esp_hal::{
     delay::Delay,
-    gpio::{DriveMode, Flex, OutputConfig, Pull},
-    clock::CpuClock,
-    main
+    gpio::{Input, DriveMode, Flex, OutputConfig, Pull, InputConfig},
+    clock::CpuClock
 };
+use embassy_time::{Duration, Timer};
 use log::info;
 
 // This creates a default app-descriptor required by the esp-idf bootloader.
@@ -29,8 +30,16 @@ fn c_to_f(celcius: f32) -> f32 {
     celcius * 9.0/5.0 + 32.0
 }
 
-#[main]
-fn main() -> ! {
+#[embassy_executor::task]
+async fn run() {
+    loop {
+        esp_println::println!("Hello world from embassy!");
+        Timer::after(Duration::from_millis(1_000)).await;
+    }
+}
+
+#[esp_rtos::main]
+async fn main(spawner: Spawner) -> ! {
     // generator version: 1.1.0
 
     esp_println::logger::init_logger_from_env();
@@ -54,8 +63,13 @@ fn main() -> ! {
 
     let mut dht22 = Dht22::new(dht22_pin, Delay::new());
 
+    // HC-SR501 PIR Sensor setup (GPIO1)
+    let mut pir_sensor = Input::new(peripherals.GPIO1, InputConfig::default());
+    spawner.spawn(run()).ok();
+
     loop {
-        info!("Hello world!");
+        pir_sensor.wait_for_high().await;
+        info!("Motion detected!");
         // Can only read DHT every 2s
         delay.delay_millis(2000);
         match dht22.read() {
