@@ -36,7 +36,3 @@ A Rust-based embedded project running on an ESP32 that integrates a PIR motion s
 * [ ] Implement a web server to expose temperature/humidity data over Wi-Fi.
 * [ ] Add a timeout or "cool down" period for the motion sensor to prevent rapid re-triggering.
 * [ ] Fine-tune the DHT22 error handling to recover more gracefully from timing-related bus errors.
-
----
-
-**Would you like me to help you implement a "debounce" timer so the motion sensor doesn't trigger the DHT read too many times in a row?**
