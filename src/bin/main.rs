@@ -34,7 +34,7 @@ fn c_to_f(celcius: f32) -> f32 {
 }
 // Static global variable so the ISR has access to the sensor, wrap it in a mutex.
 static MOTION_SENSOR: Mutex<RefCell<Option<Input>>> = Mutex::new(RefCell::new(None));
-static DHT_SENSOR: Mutex<RefCell<Option<Dht22<Flex, Delay>>>> = Mutex::new(RefCell::new(None));
+static MOTION_DETECTED: Mutex<RefCell<bool>> = Mutex::new(RefCell::new(false));
 
 #[main]
 fn main() -> ! {
@@ -44,7 +44,6 @@ fn main() -> ! {
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
-    let delay = Delay::new();
     let mut io = Io::new(peripherals.IO_MUX);
     io.set_interrupt_handler(handler);
 
@@ -61,19 +60,34 @@ fn main() -> ! {
     dht22_pin.set_input_enable(true);
     dht22_pin.set_high();
 
-    let dht22 = Dht22::new(dht22_pin, Delay::new());
+    let mut dht22 = Dht22::new(dht22_pin, Delay::new());
 
     // HC-SR501 PIR Sensor setup (GPIO1)
     let mut pir_sensor = Input::new(peripherals.GPIO1, InputConfig::default());
     critical_section::with(|cs| {
-        pir_sensor.listen(Event::FallingEdge);
+        pir_sensor.listen(Event::RisingEdge);
         MOTION_SENSOR.borrow_ref_mut(cs).replace(pir_sensor);
-        DHT_SENSOR.borrow_ref_mut(cs).replace(dht22)
     });
 
     loop {
         // TODO: Web server logic?
-        delay.delay_millis(200);
+        critical_section::with(|cs| {
+            let mut triggered = MOTION_DETECTED.borrow_ref_mut(cs);
+            if *triggered {
+                match dht22.read() {
+                    Ok(sensor_reading) => {
+                        esp_println::println!{"DHT Sensor: Temp {}, Humidity {} ", 
+                            c_to_f(sensor_reading.temperature),
+                            sensor_reading.humidity 
+                        };
+                    },
+                    Err(e) => {
+                        esp_println::dbg!("An error occurred: {}", e);
+                    }
+                }
+                *triggered = false;
+            }
+        })
 
     }
     // for inspiration have a look at the examples at https://github.com/esp-rs/esp-hal/tree/esp-hal-v~1.0/examples
@@ -91,22 +105,10 @@ fn handler() {
             .is_interrupt_set()
     }) {
         esp_println::println!("Motion was the source of the interrupt");
-        // Read temp and humidity here
+        // Set the flag and clear the interrupt
         critical_section::with(|cs| {
-            match DHT_SENSOR.borrow_ref_mut(cs).as_mut().unwrap().read() {
-                Ok(sensor_reading) => {
-                    esp_println::println!{"DHT Sensor: Temp {}, Humidity {} ", 
-                        c_to_f(sensor_reading.temperature),
-                        sensor_reading.humidity 
-                    };
-                },
-                Err(e) => {
-                    esp_println::dbg!("An error occurred: {}", e);
-                }
-            }
-        });
-
-        critical_section::with(|cs| {
+            // Borrow a mutable reference, then dereference to change the value.
+            *MOTION_DETECTED.borrow_ref_mut(cs) = true;
             MOTION_SENSOR
                 .borrow_ref_mut(cs)
                 .as_mut()
